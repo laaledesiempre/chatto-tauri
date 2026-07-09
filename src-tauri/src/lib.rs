@@ -368,6 +368,42 @@ const KEYBOARD_VIEWPORT_SHIM_JS: &str = r#"
 "#;
 
 #[cfg(target_os = "android")]
+const SCREEN_SHARE_TAB_JS: &str = r#"
+(function() {
+    if (window.__chattoScreenShareTabPatched) return;
+    window.__chattoScreenShareTabPatched = true;
+
+    var md = navigator.mediaDevices;
+    if (!md || typeof md.getDisplayMedia !== 'function') {
+        console.log('[chatto] getDisplayMedia not available; screen share cannot be patched on this WebView');
+        return;
+    }
+
+    var original = md.getDisplayMedia.bind(md);
+    md.getDisplayMedia = function(constraints) {
+        constraints = constraints || {};
+        if (typeof constraints !== 'object') {
+            constraints = {};
+        }
+        // On Android WebView, Chromium only reliably supports DISPLAY_VIDEO_CAPTURE_THIS_TAB.
+        // Preferring the current tab and including the self-browser surface makes the picker
+        // default to (and only offer) the current webview tab.
+        constraints.preferCurrentTab = true;
+        constraints.selfBrowserSurface = 'include';
+        constraints.surfaceSwitching = 'exclude';
+        constraints.systemAudio = 'exclude';
+        console.log('[chatto] patched getDisplayMedia constraints:', JSON.stringify(constraints));
+        return original(constraints);
+    };
+
+    // Mark the patched function so it can be detected by other shims.
+    if (md.getDisplayMedia) {
+        md.getDisplayMedia.__chattoPatched = true;
+    }
+})();
+"#;
+
+#[cfg(target_os = "android")]
 const ACTIVE_ROOM_TRACKER_JS: &str = r#"
 (function() {
     if (window.__chattoRoomTracker) return;
@@ -1188,7 +1224,8 @@ fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     #[cfg(target_os = "android")]
     let builder = builder
         .initialization_script(KEYBOARD_VIEWPORT_SHIM_JS)
-        .initialization_script(ACTIVE_ROOM_TRACKER_JS);
+        .initialization_script(ACTIVE_ROOM_TRACKER_JS)
+        .initialization_script(SCREEN_SHARE_TAB_JS);
 
     #[cfg(desktop)]
     let builder = {
