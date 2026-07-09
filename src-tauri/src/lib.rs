@@ -374,12 +374,8 @@ const ACTIVE_ROOM_TRACKER_JS: &str = r#"
     window.__chattoRoomTracker = true;
 
     function reportRoom() {
-        // Tolerate both /chat/<roomId> (current) and /chat/<spaceId>/<roomId>
-        // (legacy, in case it lingers somewhere). roomId is the segment that
-        // ends the path or precedes the next slash.
         var m = window.location.pathname.match(/^\/chat\/(?:[^\/]+\/)?([^\/?#]+)/);
         var roomId = m ? m[1] : '';
-        // Call Android JavascriptInterface directly, no Rust IPC needed
         if (window.ChattoAndroid && window.ChattoAndroid.setActiveRoom) {
             window.ChattoAndroid.setActiveRoom(roomId);
         }
@@ -400,6 +396,128 @@ const ACTIVE_ROOM_TRACKER_JS: &str = r#"
     reportRoom();
 })();
 "#;
+
+#[cfg(target_os = "android")]
+const SCREEN_SHARE_BRIDGE_JS: &str = r##"
+(function() {
+    if (window.__chattoScreenShareBridge) return;
+    window.__chattoScreenShareBridge = true;
+
+    window.__chattoScreenShareState = {
+        active: false,
+        livekitUrl: null,
+        token: null,
+        e2eeKey: null,
+        roomId: null
+    };
+
+    (function() {
+        var originalFetch = window.fetch;
+        window.fetch = function(input, init) {
+            return originalFetch.apply(this, arguments).then(function(response) {
+                try {
+                    var url = typeof input === 'string' ? input : (input.url || input.toString());
+                    if (!url) return response;
+                    var cloned = response.clone();
+                    cloned.text().then(function(text) {
+                        if (!text) return;
+                        if (url.indexOf('/chatto.api.v1.ServerService/GetRuntimeConfig') !== -1) {
+                            try {
+                                var json = JSON.parse(text);
+                                var runtime = json.runtime || json;
+                                if (runtime && runtime.livekitUrl) {
+                                    window.__chattoScreenShareState.livekitUrl = runtime.livekitUrl;
+                                }
+                            } catch(e) {}
+                        }
+                        if (url.indexOf('/chatto.api.v1.VoiceCallService/GetCallToken') !== -1) {
+                            try {
+                                var json = JSON.parse(text);
+                                if (json.token) window.__chattoScreenShareState.token = json.token;
+                                if (json.e2eeKey) window.__chattoScreenShareState.e2eeKey = json.e2eeKey;
+                            } catch(e) {}
+                        }
+                        if (url.indexOf('/chatto.api.v1.VoiceCallService/JoinCall') !== -1) {
+                            try {
+                                var json = JSON.parse(text);
+                                if (json.callId) window.__chattoScreenShareState.roomId = json.roomId || json.callId;
+                            } catch(e) {}
+                        }
+                    }).catch(function() {});
+                } catch(e) {}
+                return response;
+            });
+        };
+    })();
+
+    function findShareButton() {
+        var labels = ['share', 'screen', 'screenshare', 'compartir', 'pantalla'];
+        var buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        for (var i = 0; i < buttons.length; i++) {
+            var b = buttons[i];
+            var text = (b.getAttribute('aria-label') || b.title || b.textContent || '').toLowerCase();
+            for (var j = 0; j < labels.length; j++) {
+                if (text.indexOf(labels[j]) !== -1) return b;
+            }
+        }
+        return null;
+    }
+
+    function replaceShareButton() {
+        var btn = findShareButton();
+        if (!btn || btn.__chattoReplaced) return;
+        var clone = btn.cloneNode(true);
+        clone.__chattoReplaced = true;
+        clone.setAttribute('data-chatto-native-share', 'true');
+        clone.title = 'Share screen';
+        clone.setAttribute('aria-label', 'Share screen');
+        btn.parentNode.replaceChild(clone, btn);
+        clone.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var state = window.__chattoScreenShareState;
+            if (!window.__TAURI_INTERNALS__) return;
+            if (state.active) {
+                window.__TAURI_INTERNALS__.invoke('stop_screen_share').catch(function(err) {
+                    console.error('[ChattoScreenShare] stop failed:', err);
+                });
+            } else {
+                if (!state.livekitUrl || !state.token) {
+                    console.warn('[ChattoScreenShare] Missing livekitUrl or token');
+                    return;
+                }
+                window.__TAURI_INTERNALS__.invoke('start_screen_share', {
+                    livekitUrl: state.livekitUrl,
+                    token: state.token,
+                    e2eeKey: state.e2eeKey
+                }).catch(function(err) {
+                    console.error('[ChattoScreenShare] start failed:', err);
+                });
+            }
+        });
+        updateShareButton(clone);
+    }
+
+    function updateShareButton(btn) {
+        if (!btn) btn = document.querySelector('[data-chatto-native-share]');
+        if (!btn) return;
+        var state = window.__chattoScreenShareState.active;
+        btn.title = state ? 'Stop sharing' : 'Share screen';
+        btn.setAttribute('aria-label', state ? 'Stop sharing' : 'Share screen');
+        if (state) btn.classList.add('chatto-screen-share-active');
+        else btn.classList.remove('chatto-screen-share-active');
+    }
+
+    window.addEventListener('chatto-screen-share-state', function(e) {
+        window.__chattoScreenShareState.active = e.detail.active;
+        updateShareButton();
+    });
+
+    var observer = new MutationObserver(function() { replaceShareButton(); });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    if (document.body) replaceShareButton();
+})();
+"##;
 
 #[cfg(mobile)]
 const MOBILE_SETTINGS_BUTTON_JS: &str = r#"
@@ -1188,7 +1306,8 @@ fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     #[cfg(target_os = "android")]
     let builder = builder
         .initialization_script(KEYBOARD_VIEWPORT_SHIM_JS)
-        .initialization_script(ACTIVE_ROOM_TRACKER_JS);
+        .initialization_script(ACTIVE_ROOM_TRACKER_JS)
+        .initialization_script(SCREEN_SHARE_BRIDGE_JS);
 
     #[cfg(desktop)]
     let builder = {
@@ -1230,6 +1349,90 @@ fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+#[cfg(target_os = "android")]
+mod screen_share {
+    use tauri::AppHandle;
+
+    #[tauri::command]
+    pub fn start_screen_share(
+        app: AppHandle,
+        livekit_url: String,
+        token: String,
+        e2ee_key: Option<String>,
+    ) -> Result<(), String> {
+        app.run_on_android_context(move |env, activity, _webview| {
+            let Ok(cls) = env.find_class("run/chatto/desktop/ScreenShareBridge") else {
+                return;
+            };
+            let Ok(ctx) = env
+                .call_method(activity, "getApplicationContext", "()Landroid/content/Context;", &[])
+                .and_then(|v| v.l())
+            else {
+                return;
+            };
+            let Ok(url) = env.new_string(&livekit_url) else { return };
+            let Ok(tok) = env.new_string(&token) else { return };
+            let e2ee = e2ee_key.as_ref().and_then(|k| env.new_string(k).ok());
+
+            let null_obj = jni::objects::JObject::null();
+            let e2ee_value: jni::objects::JValue = e2ee
+                .as_ref()
+                .map(|s| (s as &jni::objects::JString).into())
+                .unwrap_or_else(|| (&null_obj).into());
+
+            let _ = env.call_static_method(
+                &cls,
+                "start",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                &[
+                    (&ctx).into(),
+                    (&url).into(),
+                    (&tok).into(),
+                    e2ee_value,
+                ],
+            );
+        });
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn stop_screen_share(app: AppHandle) -> Result<(), String> {
+        app.run_on_android_context(move |env, activity, _webview| {
+            let Ok(cls) = env.find_class("run/chatto/desktop/ScreenShareBridge") else { return };
+            let Ok(ctx) = env
+                .call_method(activity, "getApplicationContext", "()Landroid/content/Context;", &[])
+                .and_then(|v| v.l())
+            else {
+                return;
+            };
+            let _ = env.call_static_method(
+                &cls,
+                "stop",
+                "(Landroid/content/Context;)V",
+                &[(&ctx).into()],
+            );
+        });
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn is_screen_sharing(app: AppHandle) -> Result<bool, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_android_context(move |env, _activity, _webview| {
+            let result = (|| {
+                let cls = env.find_class("run/chatto/desktop/ScreenShareBridge")
+                    .map_err(|e| e.to_string())?;
+                let result = env
+                    .call_static_method(&cls, "isSharing", "()Z", &[])
+                    .map_err(|e| e.to_string())?;
+                result.z().map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(result);
+        });
+        rx.recv().map_err(|e| e.to_string())?
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1263,6 +1466,9 @@ pub fn run() {
         set_notifications_enabled,
         check_instance_flow,
         set_badge,
+        start_screen_share,
+        stop_screen_share,
+        is_screen_sharing,
     ]);
 
     let builder = builder

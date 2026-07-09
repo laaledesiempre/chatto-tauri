@@ -66,6 +66,11 @@
                 android:value="Maintains WebSocket connection for real-time chat notifications" />
         </service>
 
+        <service
+            android:name=".ScreenShareService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
