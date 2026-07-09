@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::{AppHandle, Manager, Runtime, Wry};
 
-pub fn init<R: Runtime>() -> TauriPlugin<R> {
+pub fn init() -> TauriPlugin<Wry> {
     Builder::new("screenShare")
         .invoke_handler(tauri::generate_handler![start, stop, is_sharing])
         .setup(|app, api| {
