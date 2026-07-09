@@ -1,3 +1,5 @@
+mod plugins;
+
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_store::StoreExt;
@@ -478,7 +480,7 @@ const SCREEN_SHARE_BRIDGE_JS: &str = r##"
             var state = window.__chattoScreenShareState;
             if (!window.__TAURI_INTERNALS__) return;
             if (state.active) {
-                window.__TAURI_INTERNALS__.invoke('stop_screen_share').catch(function(err) {
+                window.__TAURI_INTERNALS__.invoke('plugin:screenShare|stop').catch(function(err) {
                     console.error('[ChattoScreenShare] stop failed:', err);
                 });
             } else {
@@ -486,7 +488,7 @@ const SCREEN_SHARE_BRIDGE_JS: &str = r##"
                     console.warn('[ChattoScreenShare] Missing livekitUrl or token');
                     return;
                 }
-                window.__TAURI_INTERNALS__.invoke('start_screen_share', {
+                window.__TAURI_INTERNALS__.invoke('plugin:screenShare|start', {
                     livekitUrl: state.livekitUrl,
                     token: state.token,
                     e2eeKey: state.e2eeKey
@@ -1349,93 +1351,11 @@ fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-#[cfg(target_os = "android")]
-mod screen_share {
-    use tauri::AppHandle;
-
-    #[tauri::command]
-    pub fn start_screen_share(
-        app: AppHandle,
-        livekit_url: String,
-        token: String,
-        e2ee_key: Option<String>,
-    ) -> Result<(), String> {
-        app.run_on_android_context(move |env, activity, _webview| {
-            let Ok(cls) = env.find_class("run/chatto/desktop/ScreenShareBridge") else {
-                return;
-            };
-            let Ok(ctx) = env
-                .call_method(activity, "getApplicationContext", "()Landroid/content/Context;", &[])
-                .and_then(|v| v.l())
-            else {
-                return;
-            };
-            let Ok(url) = env.new_string(&livekit_url) else { return };
-            let Ok(tok) = env.new_string(&token) else { return };
-            let e2ee = e2ee_key.as_ref().and_then(|k| env.new_string(k).ok());
-
-            let null_obj = jni::objects::JObject::null();
-            let e2ee_value: jni::objects::JValue = e2ee
-                .as_ref()
-                .map(|s| (s as &jni::objects::JString).into())
-                .unwrap_or_else(|| (&null_obj).into());
-
-            let _ = env.call_static_method(
-                &cls,
-                "start",
-                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                &[
-                    (&ctx).into(),
-                    (&url).into(),
-                    (&tok).into(),
-                    e2ee_value,
-                ],
-            );
-        });
-        Ok(())
-    }
-
-    #[tauri::command]
-    pub fn stop_screen_share(app: AppHandle) -> Result<(), String> {
-        app.run_on_android_context(move |env, activity, _webview| {
-            let Ok(cls) = env.find_class("run/chatto/desktop/ScreenShareBridge") else { return };
-            let Ok(ctx) = env
-                .call_method(activity, "getApplicationContext", "()Landroid/content/Context;", &[])
-                .and_then(|v| v.l())
-            else {
-                return;
-            };
-            let _ = env.call_static_method(
-                &cls,
-                "stop",
-                "(Landroid/content/Context;)V",
-                &[(&ctx).into()],
-            );
-        });
-        Ok(())
-    }
-
-    #[tauri::command]
-    pub fn is_screen_sharing(app: AppHandle) -> Result<bool, String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.run_on_android_context(move |env, _activity, _webview| {
-            let result = (|| {
-                let cls = env.find_class("run/chatto/desktop/ScreenShareBridge")
-                    .map_err(|e| e.to_string())?;
-                let result = env
-                    .call_static_method(&cls, "isSharing", "()Z", &[])
-                    .map_err(|e| e.to_string())?;
-                result.z().map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(result);
-        });
-        rx.recv().map_err(|e| e.to_string())?
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
+
+    let builder = builder.plugin(plugins::screen_share::init());
 
     #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -1466,9 +1386,6 @@ pub fn run() {
         set_notifications_enabled,
         check_instance_flow,
         set_badge,
-        start_screen_share,
-        stop_screen_share,
-        is_screen_sharing,
     ]);
 
     let builder = builder
